@@ -66,32 +66,30 @@ jobs:
 
       - name: Configure Tailscale Auto-Reconnect on Restart
         shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           # ======================================================
           # إنشاء سكريبت يعيد تشغيل Tailscale تلقائياً بعد أي restart
           # ======================================================
           $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-          $authKey     = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+          $authKey     = $env:TAILSCALE_AUTH_KEY
           $hostname    = "gh-runner-$env:GITHUB_RUN_ID"
 
-          $scriptContent = @"
-          `$tailscaleExe = '$tailscaleExe'
-          `$maxWait = 120   # ثواني الانتظار حتى يجهز النظام بعد الـ restart
-          `$waited  = 0
-
-          # انتظر حتى يصبح الـ service متاحاً
-          while (`$waited -lt `$maxWait) {
-              try {
-                  `$svc = Get-Service -Name Tailscale -ErrorAction Stop
-                  if (`$svc.Status -eq 'Running') { break }
-              } catch {}
-              Start-Sleep -Seconds 5
-              `$waited += 5
-          }
-
-          # أعد الاتصال بنفس الـ authkey والـ hostname
-          & `$tailscaleExe up --authkey=$authKey --hostname=$hostname
-"@
+          $scriptContent = (
+            "`$tailscaleExe = '$tailscaleExe'" + [Environment]::NewLine +
+            "`$maxWait = 120" + [Environment]::NewLine +
+            "`$waited  = 0" + [Environment]::NewLine +
+            "while (`$waited -lt `$maxWait) {" + [Environment]::NewLine +
+            "    try {" + [Environment]::NewLine +
+            "        `$svc = Get-Service -Name Tailscale -ErrorAction Stop" + [Environment]::NewLine +
+            "        if (`$svc.Status -eq 'Running') { break }" + [Environment]::NewLine +
+            "    } catch {}" + [Environment]::NewLine +
+            "    Start-Sleep -Seconds 5" + [Environment]::NewLine +
+            "    `$waited += 5" + [Environment]::NewLine +
+            "}" + [Environment]::NewLine +
+            "& `$tailscaleExe up --authkey=$authKey --hostname=$hostname"
+          )
 
           $scriptPath = "C:\TailscaleReconnect.ps1"
           Set-Content -Path $scriptPath -Value $scriptContent -Encoding UTF8
