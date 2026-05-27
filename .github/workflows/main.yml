@@ -64,6 +64,53 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
+      - name: Configure Tailscale Auto-Reconnect on Restart
+        shell: pwsh
+        run: |
+          # ======================================================
+          # إنشاء سكريبت يعيد تشغيل Tailscale تلقائياً بعد أي restart
+          # ======================================================
+          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+          $authKey     = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+          $hostname    = "gh-runner-$env:GITHUB_RUN_ID"
+
+          $scriptContent = @"
+          `$tailscaleExe = '$tailscaleExe'
+          `$maxWait = 120   # ثواني الانتظار حتى يجهز النظام بعد الـ restart
+          `$waited  = 0
+
+          # انتظر حتى يصبح الـ service متاحاً
+          while (`$waited -lt `$maxWait) {
+              try {
+                  `$svc = Get-Service -Name Tailscale -ErrorAction Stop
+                  if (`$svc.Status -eq 'Running') { break }
+              } catch {}
+              Start-Sleep -Seconds 5
+              `$waited += 5
+          }
+
+          # أعد الاتصال بنفس الـ authkey والـ hostname
+          & `$tailscaleExe up --authkey=$authKey --hostname=$hostname
+"@
+
+          $scriptPath = "C:\TailscaleReconnect.ps1"
+          Set-Content -Path $scriptPath -Value $scriptContent -Encoding UTF8
+
+          # سجّل المهمة في Task Scheduler لتعمل عند بدء تشغيل النظام
+          $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+                       -Argument "-ExecutionPolicy Bypass -NonInteractive -File `"$scriptPath`""
+          $trigger = New-ScheduledTaskTrigger -AtStartup
+          $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+          $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+
+          Register-ScheduledTask -TaskName "TailscaleAutoReconnect" `
+                                 -Action $action `
+                                 -Trigger $trigger `
+                                 -Principal $principal `
+                                 -Settings $settings `
+                                 -Force
+          Write-Host "✅ Tailscale auto-reconnect task registered."
+
       - name: Establish Tailscale Connection
         shell: pwsh
         run: |
@@ -100,6 +147,8 @@ jobs:
       - name: Maintain Connection
         shell: pwsh
         run: |
+          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
@@ -107,6 +156,44 @@ jobs:
           Write-Host "==================`n"
 
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+              # ======================================================
+              # تحقق من حالة Tailscale وأعد الاتصال إن كان offline
+              # ======================================================
+              try {
+                  $status = & $tailscaleExe status --json 2>$null | ConvertFrom-Json
+                  $isOnline = $status.BackendState -eq "Running"
+              } catch {
+                  $isOnline = $false
+              }
+
+              if (-not $isOnline) {
+                  Write-Host "[$(Get-Date)] ⚠️  Tailscale offline — attempting reconnect..."
+
+                  # انتظر حتى يكتمل أي restart جارٍ (تحقق من اتصال الشبكة أولاً)
+                  $netReady = $false
+                  $netRetries = 0
+                  while (-not $netReady -and $netRetries -lt 24) {
+                      try {
+                          $ping = Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet
+                          if ($ping) { $netReady = $true }
+                      } catch {}
+                      if (-not $netReady) {
+                          Write-Host "[$(Get-Date)] 🔄 Waiting for network... ($netRetries/24)"
+                          Start-Sleep -Seconds 10
+                          $netRetries++
+                      }
+                  }
+
+                  if ($netReady) {
+                      & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+                                         --hostname=gh-runner-$env:GITHUB_RUN_ID
+                      Write-Host "[$(Get-Date)] ✅ Tailscale reconnected."
+                  } else {
+                      Write-Host "[$(Get-Date)] ❌ Network unavailable after waiting. Will retry next cycle."
+                  }
+              } else {
+                  Write-Host "[$(Get-Date)] ✅ RDP Active — Tailscale online"
+              }
+
+              Start-Sleep -Seconds 30
           }
