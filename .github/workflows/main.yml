@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 58
+    timeout-minutes: 3600
 
     steps:
       - name: Configure Core RDP Settings
@@ -43,16 +43,11 @@ jobs:
           $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-              Set-LocalUser -Name "RDP" -Password $securePass
-          } else {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          }
-
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
           if (-not (Get-LocalUser -Name "RDP")) {
               Write-Error "User creation failed"
@@ -62,10 +57,6 @@ jobs:
       - name: Install Tailscale
         shell: pwsh
         run: |
-          if (Get-Command tailscale -ErrorAction SilentlyContinue) {
-              Write-Host "Tailscale already installed, skipping."
-              exit 0
-          }
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = Join-Path $env:RUNNER_TEMP "tailscale.msi"
 
@@ -75,18 +66,16 @@ jobs:
 
       - name: Establish Tailscale Connection
         shell: pwsh
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
 
-          & $tailscaleExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-rdp-runner --reset
+          & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
 
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & $tailscaleExe ip -4
               Start-Sleep -Seconds 5
-              $tsIP = (& $tailscaleExe ip -4 2>$null)
               $retries++
           }
 
@@ -110,82 +99,14 @@ jobs:
 
       - name: Maintain Connection
         shell: pwsh
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          GH_WORKFLOW: ${{ github.workflow }}
         run: |
-          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address  : $env:TAILSCALE_IP"
-          Write-Host "Username : RDP"
-          Write-Host "Password : $env:RDP_PASSWORD"
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
 
-          $deadline = (Get-Date).AddMinutes(50)
-
           while ($true) {
-              # ======================================================
-              # تحقق من الوقت — لو اقتربنا من الـ deadline أعد تشغيل الـ workflow
-              # ======================================================
-              if ((Get-Date) -ge $deadline) {
-                  Write-Host "[$(Get-Date)] 🔁 Approaching time limit — triggering new workflow run..."
-                  $headers = @{
-                      Authorization = "Bearer $env:GH_TOKEN"
-                      Accept        = "application/vnd.github+json"
-                      "X-GitHub-Api-Version" = "2022-11-28"
-                  }
-                  $body = (@{ ref = "main" } | ConvertTo-Json)
-                  $uri  = "https://api.github.com/repos/$env:GH_REPO/actions/workflows/$env:GH_WORKFLOW/dispatches"
-                  try {
-                      Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $body -ContentType "application/json"
-                      Write-Host "[$(Get-Date)] ✅ New workflow triggered successfully."
-                  } catch {
-                      Write-Host "[$(Get-Date)] ❌ Failed to trigger workflow: $_"
-                  }
-                  Start-Sleep -Seconds 120
-                  exit 0
-              }
-
-              # ======================================================
-              # تحقق من حالة Tailscale وأعد الاتصال إن كان offline
-              # ======================================================
-              try {
-                  $status   = & $tailscaleExe status --json 2>$null | ConvertFrom-Json
-                  $isOnline = $status.BackendState -eq "Running"
-              } catch {
-                  $isOnline = $false
-              }
-
-              if (-not $isOnline) {
-                  Write-Host "[$(Get-Date)] ⚠️  Tailscale offline — attempting reconnect..."
-
-                  $netReady   = $false
-                  $netRetries = 0
-                  while (-not $netReady -and $netRetries -lt 24) {
-                      try {
-                          if (Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet) {
-                              $netReady = $true
-                          }
-                      } catch {}
-                      if (-not $netReady) {
-                          Write-Host "[$(Get-Date)] 🔄 Waiting for network... ($netRetries/24)"
-                          Start-Sleep -Seconds 10
-                          $netRetries++
-                      }
-                  }
-
-                  if ($netReady) {
-                      & $tailscaleExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-rdp-runner
-                      Write-Host "[$(Get-Date)] ✅ Tailscale reconnected."
-                  } else {
-                      Write-Host "[$(Get-Date)] ❌ Network unavailable after waiting."
-                  }
-              } else {
-                  Write-Host "[$(Get-Date)] ✅ RDP Active — Tailscale online"
-              }
-
-              Start-Sleep -Seconds 30
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
