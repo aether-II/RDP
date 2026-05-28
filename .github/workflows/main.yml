@@ -1,10 +1,10 @@
-name: Android ADB Access
+name: Android VNC Access
 
 on:
   workflow_dispatch:
 
 jobs:
-  android-adb:
+  android-vnc:
     runs-on: macos-latest
     timeout-minutes: 3600
 
@@ -31,10 +31,9 @@ jobs:
         run: |
           nohup $ANDROID_HOME/emulator/emulator \
             -avd Pixel_API_34 \
-            -no-window -no-audio -no-boot-anim \
+            -no-audio -no-boot-anim \
             -gpu swiftshader_indirect &
 
-          # انتظر حتى يبدأ الإمولايتر
           adb wait-for-device
           BOOTED=""
           RETRIES=0
@@ -45,11 +44,34 @@ jobs:
           done
           echo "Emulator booted!"
 
+      - name: Install & Start VNC Server
+        run: |
+          brew install tiger-vnc
+
+          VNC_PASS=$(openssl rand -base64 8 | tr -dc 'A-Za-z0-9' | head -c 8)
+          echo "$VNC_PASS" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          echo "VNC_PASS=$VNC_PASS" >> $GITHUB_ENV
+
+          # شغّل virtual display
+          Xvfb :1 -screen 0 1280x800x24 &
+          export DISPLAY=:1
+
+          # شغّل VNC على الـ display
+          x0vncserver -display :1 -passwordfile ~/.vnc/passwd -rfbport 5900 &
+          sleep 3
+
+          # شغّل الإمولايتر على نفس الـ display
+          DISPLAY=:1 nohup $ANDROID_HOME/emulator/emulator \
+            -avd Pixel_API_34 \
+            -no-audio -no-boot-anim \
+            -gpu swiftshader_indirect &
+
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-android-${{ github.run_id }}
+            --hostname=gh-vnc-${{ github.run_id }}
 
           TS_IP=""
           RETRIES=0
@@ -60,22 +82,16 @@ jobs:
           done
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      - name: Enable ADB over TCP
-        run: |
-          adb tcpip 5555
-          sleep 3
-          echo "ADB_PORT=5555" >> $GITHUB_ENV
-
       - name: Maintain Connection
         run: |
           echo ""
-          echo "=== ANDROID ADB ACCESS ==="
-          echo "Connect: adb connect $TAILSCALE_IP:5555"
-          echo "Shell:   adb -s $TAILSCALE_IP:5555 shell"
-          echo "=========================="
+          echo "=== VNC ACCESS ==="
+          echo "Host:     $TAILSCALE_IP"
+          echo "Port:     5900"
+          echo "Password: $VNC_PASS"
+          echo "=================="
           echo ""
           while true; do
-            echo "[$(date)] Android Emulator Active"
-            adb devices
+            echo "[$(date)] VNC Active"
             sleep 300
           done
