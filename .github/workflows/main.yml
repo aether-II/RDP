@@ -1,3 +1,4 @@
+
 name: RDP
 
 on:
@@ -5,10 +6,107 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+    runs-on: windows-2022
+    timeout-minutes: 360
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Tiny Debloat (low RAM)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          function Show-Ram {
+              $os = Get-CimInstance Win32_OperatingSystem
+              $used = [math]::Round(($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB, 2)
+              $total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+              Write-Host "RAM used: $used GB / $total GB"
+          }
+          Write-Host "=== BEFORE ==="; Show-Ram
+          Get-PSDrive C | Select-Object Used, Free
+
+          # Defender
+          Set-MpPreference -DisableRealtimeMonitoring $true `
+                           -DisableIOAVProtection $true `
+                           -DisableBehaviorMonitoring $true `
+                           -DisableScriptScanning $true `
+                           -DisableBlockAtFirstSeen $true
+          Add-MpPreference -ExclusionPath 'C:\'
+
+          # الخدمات الثقيلة
+          $services = @(
+            'wuauserv','UsoSvc','DiagTrack','SysMain','WSearch','WerSvc',
+            'MapsBroker','dmwappushservice','XblAuthManager','XblGameSave',
+            'Fax','RetailDemo','WpnService','PcaSvc','docker','W3SVC','WAS',
+            'MSSQL*','SQLWriter','SQLBrowser','SQLTELEMETRY*','postgresql*',
+            'MySQL*','MongoDB','mongodb','Spooler','edgeupdate','edgeupdatem',
+            'gupdate','gupdatem','MozillaMaintenance','VSStandardCollectorService150',
+            'ssh-agent','SharedAccess','lfsvc','TrkWks','BITS','DoSvc',
+            'wscsvc','SecurityHealthService','Sense','WdiServiceHost','WdiSystemHost',
+            'StorSvc','TabletInputService','PhoneSvc','WbioSrvc','CDPSvc','CDPUserSvc*',
+            'OneSyncSvc*','PrintNotify','SSDPSRV','upnphost','FontCache','ShellHWDetection'
+          )
+          foreach ($name in $services) {
+              Get-Service -Name $name | ForEach-Object {
+                  Stop-Service -Name $_.Name -Force
+                  Set-Service  -Name $_.Name -StartupType Disabled
+              }
+          }
+
+          # قتل العمليات الثقيلة
+          'msedge','chrome','firefox','msedgewebview2','OneDrive','Teams','SearchApp',
+          'SearchIndexer','MicrosoftEdgeUpdate','vctip','MSBuild','node','dotnet' |
+            ForEach-Object { Get-Process -Name $_ | Stop-Process -Force }
+
+          # حذف الأدوات المثبتة مسبقًا
+          $junk = @(
+            'C:\Android','C:\Program Files (x86)\Android','C:\Program Files\Android',
+            'C:\Program Files (x86)\Microsoft Visual Studio',
+            'C:\Program Files\Microsoft Visual Studio',
+            'C:\Program Files\Microsoft SQL Server','C:\Program Files\MongoDB',
+            'C:\Program Files\PostgreSQL','C:\Program Files\MySQL',
+            'C:\Program Files\Docker','C:\Program Files\LLVM',
+            'C:\Program Files\Azure Cosmos DB Emulator',
+            'C:\Program Files\Google','C:\Program Files\Mozilla Firefox',
+            'C:\Strawberry','C:\selenium','C:\mingw64','C:\msys64',
+            'C:\ProgramData\chocolatey\lib','C:\hostedtoolcache',
+            'C:\Windows\SoftwareDistribution\Download'
+          )
+          foreach ($p in $junk) {
+              if (Test-Path $p) { Write-Host "Removing $p"; Remove-Item $p -Recurse -Force }
+          }
+
+          # تطبيقات Appx
+          Get-AppxPackage -AllUsers |
+            Where-Object { $_.Name -notmatch 'Store|NET|VCLibs|UI\.Xaml|ShellExperience|StartMenu|Terminal|DesktopAppInstaller' } |
+            Remove-AppxPackage -AllUsers
+
+          # المهام المجدولة
+          '\Microsoft\Windows\Application Experience\*',
+          '\Microsoft\Windows\Customer Experience Improvement Program\*',
+          '\Microsoft\Windows\UpdateOrchestrator\*',
+          '\Microsoft\Windows\Windows Error Reporting\*',
+          '\Microsoft\Windows\WindowsUpdate\*',
+          '\Microsoft\Windows\Defender\*',
+          '\Microsoft\Windows\Diagnosis\*',
+          '\Microsoft\Windows\DiskDiagnostic\*',
+          '\Microsoft\Windows\Maintenance\*' |
+            ForEach-Object { Get-ScheduledTask -TaskPath $_ | Disable-ScheduledTask }
+
+          # التليمتري والتأثيرات والطاقة
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 -Force
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Value 0 -Force
+          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Value 2 -Force
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Force
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+
+          Start-Sleep -Seconds 10
+          Write-Host "=== AFTER ==="; Show-Ram
+          Get-PSDrive C | Select-Object Used, Free
+
       - name: Configure Core RDP Settings
         shell: pwsh
         run: |
@@ -18,11 +116,9 @@ jobs:
                            -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "SecurityLayer" -Value 0 -Force
-
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
-
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Secure Password
@@ -37,29 +133,38 @@ jobs:
                          [char[]](91..96) + [char[]](123..126))
           }
           $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Upper   | Get-Random -Count 4
+          $rawPassword += $charSet.Lower   | Get-Random -Count 4
+          $rawPassword += $charSet.Number  | Get-Random -Count 4
           $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Administrators"       -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
           if (-not (Get-LocalUser -Name "RDP")) {
               Write-Error "User creation failed"
               exit 1
           }
+
+      - name: Disable Shutdown & Restart for RDP User
+        shell: pwsh
+        run: |
+          secedit /export /cfg "$env:TEMP\secpol.cfg"
+          (Get-Content "$env:TEMP\secpol.cfg") `
+            -replace "SeShutdownPrivilege.*", "" |
+            Set-Content "$env:TEMP\secpol.cfg"
+          secedit /configure /db secedit.sdb `
+            /cfg "$env:TEMP\secpol.cfg" /quiet
+          Remove-Item "$env:TEMP\secpol.cfg" -Force
+          Write-Host "Shutdown/Restart disabled for RDP user"
 
       - name: Install Tailscale
         shell: pwsh
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = Join-Path $env:RUNNER_TEMP "tailscale.msi"
-
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
@@ -68,9 +173,8 @@ jobs:
         shell: pwsh
         run: |
           $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-
-          & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-
+          & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -78,7 +182,6 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-
           if (-not $tsIP) {
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
@@ -89,7 +192,6 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
@@ -100,13 +202,55 @@ jobs:
       - name: Maintain Connection
         shell: pwsh
         run: |
+          $src       = "$env:GITHUB_WORKSPACE\Codebase"
+          $downloads = "C:\Users\RDP\Downloads"
+
+          if (-not (Test-Path $downloads)) {
+              New-Item -ItemType Directory -Path $downloads -Force | Out-Null
+          }
+
+          if (Test-Path $src) {
+              Copy-Item -Path "$src\*" -Destination $downloads -Recurse -Force
+              Write-Host "Files copied to Downloads:"
+              Get-ChildItem $downloads -Recurse | Select-Object FullName
+          } else {
+              Write-Warning "Codebase folder not found in repo"
+          }
+
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Address : $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_CREDS"
+          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "Files at: C:\Users\RDP\Downloads"
           Write-Host "==================`n"
 
+          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+              try {
+                  $uptime = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+                  $os = Get-CimInstance Win32_OperatingSystem
+                  $usedGB = [math]::Round(($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB, 2)
+
+                  $rdpService = Get-Service -Name TermService -ErrorAction Stop
+                  if ($rdpService.Status -ne 'Running') {
+                      Write-Warning "[$(Get-Date)] TermService stopped — restarting..."
+                      Restart-Service -Name TermService -Force
+                  }
+
+                  $tsService = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
+                  if ($tsService -and $tsService.Status -ne 'Running') {
+                      Write-Warning "[$(Get-Date)] Tailscale stopped — restarting..."
+                      Start-Service -Name Tailscale
+                      Start-Sleep -Seconds 5
+                      & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }}
+                  }
+
+                  Write-Host "[$(Get-Date)] OK — Uptime: $([math]::Round($uptime.TotalMinutes, 1)) min — RAM used: $usedGB GB"
+
+              } catch {
+                  Write-Error "[$(Get-Date)] ERROR: $($_.Exception.Message)"
+              }
+
+              Start-Sleep -Seconds 1800
           }
