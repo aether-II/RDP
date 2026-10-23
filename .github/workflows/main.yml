@@ -1,4 +1,3 @@
-
 name: RDP
 
 on:
@@ -6,106 +5,12 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: windows-2022
-    timeout-minutes: 360
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Tiny Debloat (low RAM)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'SilentlyContinue'
-          function Show-Ram {
-              $os = Get-CimInstance Win32_OperatingSystem
-              $used = [math]::Round(($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB, 2)
-              $total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
-              Write-Host "RAM used: $used GB / $total GB"
-          }
-          Write-Host "=== BEFORE ==="; Show-Ram
-          Get-PSDrive C | Select-Object Used, Free
-
-          # Defender
-          Set-MpPreference -DisableRealtimeMonitoring $true `
-                           -DisableIOAVProtection $true `
-                           -DisableBehaviorMonitoring $true `
-                           -DisableScriptScanning $true `
-                           -DisableBlockAtFirstSeen $true
-          Add-MpPreference -ExclusionPath 'C:\'
-
-          # الخدمات الثقيلة
-          $services = @(
-            'wuauserv','UsoSvc','DiagTrack','SysMain','WSearch','WerSvc',
-            'MapsBroker','dmwappushservice','XblAuthManager','XblGameSave',
-            'Fax','RetailDemo','WpnService','PcaSvc','docker','W3SVC','WAS',
-            'MSSQL*','SQLWriter','SQLBrowser','SQLTELEMETRY*','postgresql*',
-            'MySQL*','MongoDB','mongodb','Spooler','edgeupdate','edgeupdatem',
-            'gupdate','gupdatem','MozillaMaintenance','VSStandardCollectorService150',
-            'ssh-agent','SharedAccess','lfsvc','TrkWks','BITS','DoSvc',
-            'wscsvc','SecurityHealthService','Sense','WdiServiceHost','WdiSystemHost',
-            'StorSvc','TabletInputService','PhoneSvc','WbioSrvc','CDPSvc','CDPUserSvc*',
-            'OneSyncSvc*','PrintNotify','SSDPSRV','upnphost','FontCache','ShellHWDetection'
-          )
-          foreach ($name in $services) {
-              Get-Service -Name $name | ForEach-Object {
-                  Stop-Service -Name $_.Name -Force
-                  Set-Service  -Name $_.Name -StartupType Disabled
-              }
-          }
-
-          # قتل العمليات الثقيلة
-          'msedge','chrome','firefox','msedgewebview2','OneDrive','Teams','SearchApp',
-          'SearchIndexer','MicrosoftEdgeUpdate','vctip','MSBuild','node','dotnet' |
-            ForEach-Object { Get-Process -Name $_ | Stop-Process -Force }
-
-          # حذف الأدوات المثبتة مسبقًا
-          $junk = @(
-            'C:\Android','C:\Program Files (x86)\Android','C:\Program Files\Android',
-            'C:\Program Files (x86)\Microsoft Visual Studio',
-            'C:\Program Files\Microsoft Visual Studio',
-            'C:\Program Files\Microsoft SQL Server','C:\Program Files\MongoDB',
-            'C:\Program Files\PostgreSQL','C:\Program Files\MySQL',
-            'C:\Program Files\Docker','C:\Program Files\LLVM',
-            'C:\Program Files\Azure Cosmos DB Emulator',
-            'C:\Program Files\Google','C:\Program Files\Mozilla Firefox',
-            'C:\Strawberry','C:\selenium','C:\mingw64','C:\msys64',
-            'C:\ProgramData\chocolatey\lib','C:\hostedtoolcache',
-            'C:\Windows\SoftwareDistribution\Download'
-          )
-          foreach ($p in $junk) {
-              if (Test-Path $p) { Write-Host "Removing $p"; Remove-Item $p -Recurse -Force }
-          }
-
-          # تطبيقات Appx
-          Get-AppxPackage -AllUsers |
-            Where-Object { $_.Name -notmatch 'Store|NET|VCLibs|UI\.Xaml|ShellExperience|StartMenu|Terminal|DesktopAppInstaller' } |
-            Remove-AppxPackage -AllUsers
-
-          # المهام المجدولة
-          '\Microsoft\Windows\Application Experience\*',
-          '\Microsoft\Windows\Customer Experience Improvement Program\*',
-          '\Microsoft\Windows\UpdateOrchestrator\*',
-          '\Microsoft\Windows\Windows Error Reporting\*',
-          '\Microsoft\Windows\WindowsUpdate\*',
-          '\Microsoft\Windows\Defender\*',
-          '\Microsoft\Windows\Diagnosis\*',
-          '\Microsoft\Windows\DiskDiagnostic\*',
-          '\Microsoft\Windows\Maintenance\*' |
-            ForEach-Object { Get-ScheduledTask -TaskPath $_ | Disable-ScheduledTask }
-
-          # التليمتري والتأثيرات والطاقة
-          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 -Force
-          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Value 0 -Force
-          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Value 2 -Force
-          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Force
-          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-
-          Start-Sleep -Seconds 10
-          Write-Host "=== AFTER ==="; Show-Ram
-          Get-PSDrive C | Select-Object Used, Free
 
       - name: Configure Core RDP Settings
         shell: pwsh
@@ -159,6 +64,32 @@ jobs:
             /cfg "$env:TEMP\secpol.cfg" /quiet
           Remove-Item "$env:TEMP\secpol.cfg" -Force
           Write-Host "Shutdown/Restart disabled for RDP user"
+
+      - name: Install Microsoft Store
+        timeout-minutes: 15
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+
+          # تسجيل winget إن لم يكن جاهزًا
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+              Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe
+          }
+
+          # إعادة تسجيل المتجر
+          $store = Get-AppxPackage -AllUsers Microsoft.WindowsStore
+          if ($store) {
+              $store | ForEach-Object {
+                  Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml"
+              }
+          } else {
+              Write-Warning "Microsoft.WindowsStore package not found"
+          }
+
+          # تثبيت المتجر عبر winget مع الموافقات التلقائية
+          winget install 9WZDNCRFJBMP --accept-package-agreements --accept-source-agreements --disable-interactivity
+          Write-Host "Exit code: $LASTEXITCODE"
 
       - name: Install Tailscale
         shell: pwsh
@@ -229,27 +160,30 @@ jobs:
           while ($true) {
               try {
                   $uptime = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-                  $os = Get-CimInstance Win32_OperatingSystem
-                  $usedGB = [math]::Round(($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB, 2)
 
+                  # فحص RDP service
                   $rdpService = Get-Service -Name TermService -ErrorAction Stop
                   if ($rdpService.Status -ne 'Running') {
                       Write-Warning "[$(Get-Date)] TermService stopped — restarting..."
                       Restart-Service -Name TermService -Force
+                      Write-Host "[$(Get-Date)] TermService restarted successfully"
                   }
 
+                  # فحص Tailscale
                   $tsService = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
                   if ($tsService -and $tsService.Status -ne 'Running') {
                       Write-Warning "[$(Get-Date)] Tailscale stopped — restarting..."
                       Start-Service -Name Tailscale
                       Start-Sleep -Seconds 5
                       & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }}
+                      Write-Host "[$(Get-Date)] Tailscale restarted successfully"
                   }
 
-                  Write-Host "[$(Get-Date)] OK — Uptime: $([math]::Round($uptime.TotalMinutes, 1)) min — RAM used: $usedGB GB"
+                  Write-Host "[$(Get-Date)] OK — Uptime: $([math]::Round($uptime.TotalMinutes, 1)) min"
 
               } catch {
                   Write-Error "[$(Get-Date)] ERROR: $($_.Exception.Message)"
+                  Write-Error "Stack: $($_.ScriptStackTrace)"
               }
 
               Start-Sleep -Seconds 1800
