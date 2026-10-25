@@ -33,17 +33,25 @@ jobs:
           echo "$ANDROID_HOME/emulator"                >> $GITHUB_PATH
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
 
+          # تثبيت مسار الـ AVD حتى يلقاه المحاكي
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> $GITHUB_ENV
+
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "emulator" \
             "system-images;android-29;google_apis_playstore;x86_64"
           echo no | avdmanager create avd -n android10 \
             -k "system-images;android-29;google_apis_playstore;x86_64" \
             -d pixel_2 --force
+          avdmanager list avd
+          ls -la "$ANDROID_AVD_HOME"
 
           # سكربت تشغيل المحاكي (يُستخدم هنا وفي إعادة التشغيل)
           cat > "$HOME/start_android.sh" << 'EMU'
           #!/usr/bin/env bash
           export DISPLAY=:0
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
           pgrep -x Xvfb >/dev/null || { setsid nohup Xvfb :0 -screen 0 1080x1920x24 >/tmp/xvfb.log 2>&1 & sleep 2; }
           pgrep -x fluxbox >/dev/null || { setsid nohup fluxbox >/tmp/fluxbox.log 2>&1 & sleep 1; }
