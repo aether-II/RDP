@@ -1,5 +1,3 @@
-
-
 name: Android10
 
 on:
@@ -8,7 +6,7 @@ on:
 jobs:
   secure-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Repository
@@ -25,7 +23,10 @@ jobs:
 
           sudo apt-get update
           sudo apt-get install -y xvfb x11vnc fluxbox socat \
-            libpulse0 libxcb-cursor0 libxkbfile1 libgl1 libnss3
+            libpulse0 libxcb-cursor0 libxkbfile1 libgl1 libnss3 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-xinerama0 libxcb-xkb1 \
+            libxkbcommon-x11-0 libxcb-randr0 libxcb-xfixes0 libxcb-sync1 \
+            libxcb-xinput0 libx11-xcb1 libxcb-glx0
 
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_HOME/platform-tools"          >> $GITHUB_PATH
@@ -49,8 +50,16 @@ jobs:
           setsid nohup emulator -avd android10 -accel on -gpu swiftshader_indirect \
             -no-snapshot -no-audio -no-boot-anim -memory 4096 -cores 3 \
             >/tmp/emulator.log 2>&1 &
+          sleep 30
+          echo "--- emulator log ---"
+          tail -n 40 /tmp/emulator.log
+          if ! pgrep -f qemu-system >/dev/null; then
+            echo "emulator NOT running"
+            exit 1
+          fi
+          echo "emulator running"
           adb start-server
-          adb wait-for-device
+          timeout 300 adb wait-for-device || { echo "adb wait timeout"; tail -n 80 /tmp/emulator.log; exit 1; }
           for i in $(seq 1 90); do
             if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
               echo "Android booted"
