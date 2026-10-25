@@ -1,190 +1,209 @@
-name: RDP
+
+
+name: Android10
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
-    runs-on: windows-2022
+  secure-android:
+    runs-on: ubuntu-latest
     timeout-minutes: 3600
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Configure Core RDP Settings
-        shell: pwsh
+      - name: Configure Core Android Settings
+        shell: bash
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                           -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
+          # تفعيل KVM
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || { echo "KVM غير متوفر على هذا الـ runner"; exit 1; }
 
-      - name: Create RDP User with Secure Password
-        shell: pwsh
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc fluxbox socat \
+            libpulse0 libxcb-cursor0 libxkbfile1 libgl1 libnss3
+
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools"          >> $GITHUB_PATH
+          echo "$ANDROID_HOME/emulator"                >> $GITHUB_PATH
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" \
+            "system-images;android-29;google_apis_playstore;x86_64"
+          echo no | avdmanager create avd -n android10 \
+            -k "system-images;android-29;google_apis_playstore;x86_64" \
+            -d pixel_2 --force
+
+          # سكربت تشغيل المحاكي (يُستخدم هنا وفي إعادة التشغيل)
+          cat > "$HOME/start_android.sh" << 'EMU'
+          #!/usr/bin/env bash
+          export DISPLAY=:0
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          pgrep -x Xvfb >/dev/null || { setsid nohup Xvfb :0 -screen 0 1080x1920x24 >/tmp/xvfb.log 2>&1 & sleep 2; }
+          pgrep -x fluxbox >/dev/null || { setsid nohup fluxbox >/tmp/fluxbox.log 2>&1 & sleep 1; }
+          setsid nohup emulator -avd android10 -accel on -gpu swiftshader_indirect \
+            -no-snapshot -no-audio -no-boot-anim -memory 4096 -cores 3 \
+            >/tmp/emulator.log 2>&1 &
+          adb start-server
+          adb wait-for-device
+          for i in $(seq 1 90); do
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+              echo "Android booted"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Emulator boot timeout"
+          tail -n 60 /tmp/emulator.log
+          exit 1
+          EMU
+          chmod +x "$HOME/start_android.sh"
+          bash "$HOME/start_android.sh"
+          adb shell getprop ro.build.version.release
+
+      - name: Create VNC Password
+        shell: bash
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126))
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper   | Get-Random -Count 4
-          $rawPassword += $charSet.Lower   | Get-Random -Count 4
-          $rawPassword += $charSet.Number  | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators"       -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          password=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 8)
+          if [ ${#password} -ne 8 ]; then
+            echo "Password generation failed"
+            exit 1
+          fi
+          echo "VNC_PASS=$password" >> $GITHUB_ENV
 
-      - name: Disable Shutdown & Restart for RDP User
-        shell: pwsh
+      - name: Keep Android Awake (No Sleep)
+        shell: bash
         run: |
-          secedit /export /cfg "$env:TEMP\secpol.cfg"
-          (Get-Content "$env:TEMP\secpol.cfg") `
-            -replace "SeShutdownPrivilege.*", "" |
-            Set-Content "$env:TEMP\secpol.cfg"
-          secedit /configure /db secedit.sdb `
-            /cfg "$env:TEMP\secpol.cfg" /quiet
-          Remove-Item "$env:TEMP\secpol.cfg" -Force
-          Write-Host "Shutdown/Restart disabled for RDP user"
+          adb shell svc power stayon true
+          adb shell settings put global stay_on_while_plugged_in 7
+          adb shell settings put system screen_off_timeout 2147483647
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell input keyevent 82
+          echo "Android sleep disabled"
 
-      - name: Install Microsoft Store
+      - name: Install Google Play Store
         timeout-minutes: 15
         continue-on-error: true
-        shell: pwsh
+        shell: bash
         run: |
-          $ProgressPreference = 'SilentlyContinue'
-
-          # تسجيل winget إن لم يكن جاهزًا
-          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-              Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe
-          }
-
-          # إعادة تسجيل المتجر
-          $store = Get-AppxPackage -AllUsers Microsoft.WindowsStore
-          if ($store) {
-              $store | ForEach-Object {
-                  Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml"
-              }
-          } else {
-              Write-Warning "Microsoft.WindowsStore package not found"
-          }
-
-          # تثبيت المتجر عبر winget مع الموافقات التلقائية
-          winget install 9WZDNCRFJBMP --accept-package-agreements --accept-source-agreements --disable-interactivity
-          Write-Host "Exit code: $LASTEXITCODE"
+          # صورة google_apis_playstore فيها المتجر جاهز
+          adb shell pm list packages > /tmp/pkgs.txt
+          if grep -q "com.android.vending" /tmp/pkgs.txt; then
+            echo "Play Store is installed"
+          else
+            echo "Play Store package not found"
+            exit 1
+          fi
 
       - name: Install Tailscale
-        shell: pwsh
+        shell: bash
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = Join-Path $env:RUNNER_TEMP "tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Establish Tailscale Connection
-        shell: pwsh
+        shell: bash
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-          & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-            --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & $tailscaleExe ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          sudo tailscale up --authkey="$TS_KEY" --hostname="gh-android-$GITHUB_RUN_ID"
+          tsIP=""
+          for i in $(seq 1 10); do
+            tsIP=$(sudo tailscale ip -4 2>/dev/null | head -n1)
+            [ -n "$tsIP" ] && break
+            sleep 5
+          done
+          if [ -z "$tsIP" ]; then
+            echo "Tailscale IP not assigned. Exiting."
+            exit 1
+          fi
+          echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
 
-      - name: Verify RDP Accessibility
-        shell: pwsh
+          # VNC على عنوان Tailscale فقط
+          mkdir -p ~/.vnc
+          x11vnc -storepasswd "$VNC_PASS" ~/.vnc/passwd
+          DISPLAY=:0 x11vnc -display :0 -rfbauth ~/.vnc/passwd \
+            -listen "$tsIP" -rfbport 5900 -forever -shared -bg -o /tmp/x11vnc.log
+
+          # ADB (للـ scrcpy من الكمبيوتر)
+          setsid nohup socat TCP-LISTEN:5555,bind="$tsIP",fork,reuseaddr TCP:127.0.0.1:5555 >/tmp/socat.log 2>&1 &
+          sleep 2
+
+      - name: Verify Android Accessibility
+        shell: bash
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
+          echo "Tailscale IP: $TAILSCALE_IP"
+          for port in 5900 5555; do
+            if timeout 5 bash -c "</dev/tcp/$TAILSCALE_IP/$port"; then
+              echo "TCP connectivity to port $port successful!"
+            else
+              echo "TCP connection to port $port failed"
               exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+            fi
+          done
+          adb devices
 
       - name: Maintain Connection
-        shell: pwsh
+        shell: bash
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          $src       = "$env:GITHUB_WORKSPACE\Codebase"
-          $downloads = "C:\Users\RDP\Downloads"
+          src="$GITHUB_WORKSPACE/Codebase"
+          downloads="/sdcard/Download"
 
-          if (-not (Test-Path $downloads)) {
-              New-Item -ItemType Directory -Path $downloads -Force | Out-Null
-          }
+          if [ -d "$src" ]; then
+            adb push "$src/." "$downloads/"
+            echo "Files copied to Downloads:"
+            adb shell ls -R "$downloads"
+            for apk in $(find "$src" -name '*.apk'); do
+              echo "Installing $apk"
+              adb install -r "$apk" || true
+            done
+          else
+            echo "WARNING: Codebase folder not found in repo"
+          fi
 
-          if (Test-Path $src) {
-              Copy-Item -Path "$src\*" -Destination $downloads -Recurse -Force
-              Write-Host "Files copied to Downloads:"
-              Get-ChildItem $downloads -Recurse | Select-Object FullName
-          } else {
-              Write-Warning "Codebase folder not found in repo"
-          }
+          echo ""
+          echo "=== ANDROID 10 ACCESS ==="
+          echo "VNC     : $TAILSCALE_IP:5900"
+          echo "Password: $VNC_PASS"
+          echo "ADB     : adb connect $TAILSCALE_IP:5555  ثم  scrcpy -s $TAILSCALE_IP:5555"
+          echo "Files at: /sdcard/Download"
+          echo "=========================="
+          echo ""
 
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address : $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASS"
-          Write-Host "Files at: C:\Users\RDP\Downloads"
-          Write-Host "==================`n"
+          while true; do
+            # فحص المحاكي
+            if ! pgrep -f "qemu-system" >/dev/null; then
+              echo "[$(date)] WARNING: Emulator stopped — restarting..."
+              bash "$HOME/start_android.sh" && echo "[$(date)] Emulator restarted successfully"
+            fi
 
-          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+            # فحص VNC
+            if ! pgrep -x x11vnc >/dev/null; then
+              echo "[$(date)] WARNING: VNC stopped — restarting..."
+              DISPLAY=:0 x11vnc -display :0 -rfbauth ~/.vnc/passwd \
+                -listen "$TAILSCALE_IP" -rfbport 5900 -forever -shared -bg -o /tmp/x11vnc.log
+            fi
 
-          while ($true) {
-              try {
-                  $uptime = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+            # فحص ADB forward
+            if ! pgrep -x socat >/dev/null; then
+              echo "[$(date)] WARNING: ADB forward stopped — restarting..."
+              setsid nohup socat TCP-LISTEN:5555,bind="$TAILSCALE_IP",fork,reuseaddr TCP:127.0.0.1:5555 >/tmp/socat.log 2>&1 &
+            fi
 
-                  # فحص RDP service
-                  $rdpService = Get-Service -Name TermService -ErrorAction Stop
-                  if ($rdpService.Status -ne 'Running') {
-                      Write-Warning "[$(Get-Date)] TermService stopped — restarting..."
-                      Restart-Service -Name TermService -Force
-                      Write-Host "[$(Get-Date)] TermService restarted successfully"
-                  }
+            # فحص Tailscale
+            if ! sudo tailscale status >/dev/null 2>&1; then
+              echo "[$(date)] WARNING: Tailscale stopped — restarting..."
+              sudo systemctl restart tailscaled || true
+              sleep 5
+              sudo tailscale up --authkey="$TS_KEY" || true
+            fi
 
-                  # فحص Tailscale
-                  $tsService = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
-                  if ($tsService -and $tsService.Status -ne 'Running') {
-                      Write-Warning "[$(Get-Date)] Tailscale stopped — restarting..."
-                      Start-Service -Name Tailscale
-                      Start-Sleep -Seconds 5
-                      & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }}
-                      Write-Host "[$(Get-Date)] Tailscale restarted successfully"
-                  }
-
-                  Write-Host "[$(Get-Date)] OK — Uptime: $([math]::Round($uptime.TotalMinutes, 1)) min"
-
-              } catch {
-                  Write-Error "[$(Get-Date)] ERROR: $($_.Exception.Message)"
-                  Write-Error "Stack: $($_.ScriptStackTrace)"
-              }
-
-              Start-Sleep -Seconds 1800
-          }
+            echo "[$(date)] OK — Android state: $(adb get-state 2>&1 | tr -d '\r')"
+            sleep 1800
+          done
