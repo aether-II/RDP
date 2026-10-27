@@ -42,9 +42,6 @@ jobs:
           username=na
           password=ask
           XRDP
-          echo "--- xrdp.ini (head and tail) ---"
-          sudo head -n 20 /etc/xrdp/xrdp.ini
-          sudo tail -n 12 /etc/xrdp/xrdp.ini
 
           # سكربت تشغيل الـ VM (يُستخدم هنا وفي إعادة التشغيل)
           cat > "$HOME/start_android.sh" << 'EMU'
@@ -134,13 +131,14 @@ jobs:
           fi
           echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
 
+          # VNC خام (للتشخيص) على عنوان Tailscale
+          setsid nohup socat TCP-LISTEN:5902,bind="$tsIP",fork,reuseaddr TCP:127.0.0.1:5901 >/tmp/socat.log 2>&1 &
+
           if ! sudo systemctl restart xrdp; then
             echo "=== xrdp FAILED: journal ==="
             sudo journalctl -xeu xrdp --no-pager | tail -n 40
             echo "=== xrdp.log ==="
             sudo tail -n 40 /var/log/xrdp.log || true
-            echo "=== xrdp -n (config test) ==="
-            sudo xrdp --nodaemon 2>&1 | head -n 30 || true
             exit 1
           fi
           sleep 3
@@ -163,6 +161,23 @@ jobs:
             echo "QEMU VNC (5901) is NOT up"
             exit 1
           fi
+
+      - name: Debug Screen
+        continue-on-error: true
+        shell: bash
+        run: |
+          { echo "screendump /tmp/screen.ppm"; sleep 2; } | socat - UNIX-CONNECT:/tmp/qemu-mon.sock > /dev/null
+          python3 - << 'PY'
+          d = open('/tmp/screen.ppm', 'rb').read()
+          parts = d.split(b'\n', 3)
+          w, h = map(int, parts[1].split())
+          pix = parts[3]
+          idx = range(0, len(pix) - 2, 150)
+          nz = sum(1 for i in idx if pix[i] | pix[i + 1] | pix[i + 2])
+          print(f"Screen resolution: {w}x{h}, non-black samples: {nz}/{len(idx)}")
+          PY
+          tail -n 20 /tmp/qemu.log || true
+          sudo tail -n 20 /var/log/xrdp.log || true
 
       - name: Maintain Connection
         shell: bash
@@ -187,6 +202,7 @@ jobs:
           echo "Address : $TAILSCALE_IP"
           echo "Username: na  (أي اسم)"
           echo "Password: $VNC_PASS"
+          echo "Raw VNC (debug): $TAILSCALE_IP:5902  (RealVNC, same password)"
           echo "=================================="
           echo ""
 
