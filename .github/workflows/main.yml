@@ -15,7 +15,7 @@ on:
 jobs:
   secure-android-desktop:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 20
 
     steps:
       - name: Checkout Repository
@@ -80,7 +80,7 @@ jobs:
           pkill -f keepawake.sh || true
           setsid nohup qemu-system-x86_64 \
             -enable-kvm -cpu host -m 8192 -smp 4 \
-            -vga std -usb -device usb-tablet \
+            -vga virtio -usb -device usb-tablet \
             -netdev user,id=n0,hostfwd=tcp:127.0.0.1:5556-:5555 -device e1000,netdev=n0 \
             -cdrom "$HOME/android.iso" -boot d \
             -display none -vnc 127.0.0.1:1,password=on \
@@ -98,7 +98,7 @@ jobs:
           # اختيار Live CD من قائمة الإقلاع
           sleep 20
           { echo "sendkey ret"; sleep 1; } | socat - UNIX-CONNECT:"$MON" > /dev/null
-          sleep 70
+          sleep 90
           # بعد الإقلاع: نبدأ إبقاء الشاشة صاحية
           setsid nohup bash "$HOME/keepawake.sh" > /dev/null 2>&1 &
           { echo "info status"; sleep 1; } | socat - UNIX-CONNECT:"$MON"
