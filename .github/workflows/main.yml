@@ -43,11 +43,32 @@ jobs:
           password=ask
           XRDP
 
+          # شهادة جديدة لـ xrdp (حل خطأ: Cannot read private key file)
+          sudo rm -f /etc/xrdp/cert.pem /etc/xrdp/key.pem
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -days 3 \
+            -subj "/CN=android-desktop" \
+            -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem
+          sudo chown xrdp:xrdp /etc/xrdp/key.pem /etc/xrdp/cert.pem
+          sudo chmod 600 /etc/xrdp/key.pem
+          sudo chmod 644 /etc/xrdp/cert.pem
+          ls -l /etc/xrdp/key.pem /etc/xrdp/cert.pem
+
+          # منع نوم شاشة Android: ضغطة Shift كل 15 ثانية
+          cat > "$HOME/keepawake.sh" << 'KA'
+          #!/usr/bin/env bash
+          while true; do
+            { echo "sendkey shift"; sleep 1; } | socat - UNIX-CONNECT:/tmp/qemu-mon.sock > /dev/null 2>&1
+            sleep 14
+          done
+          KA
+          chmod +x "$HOME/keepawake.sh"
+
           # سكربت تشغيل الـ VM (يُستخدم هنا وفي إعادة التشغيل)
           cat > "$HOME/start_android.sh" << 'EMU'
           #!/usr/bin/env bash
           MON=/tmp/qemu-mon.sock
           rm -f "$MON"
+          pkill -f keepawake.sh || true
           setsid nohup qemu-system-x86_64 \
             -enable-kvm -cpu host -m 6144 -smp 3 \
             -vga std -usb -device usb-tablet \
@@ -69,6 +90,8 @@ jobs:
           sleep 20
           { echo "sendkey ret"; sleep 1; } | socat - UNIX-CONNECT:"$MON" > /dev/null
           sleep 60
+          # بعد الإقلاع: نبدأ إبقاء الشاشة صاحية
+          setsid nohup bash "$HOME/keepawake.sh" > /dev/null 2>&1 &
           { echo "info status"; sleep 1; } | socat - UNIX-CONNECT:"$MON"
           echo "QEMU running"
           EMU
@@ -173,8 +196,12 @@ jobs:
           w, h = map(int, parts[1].split())
           pix = parts[3]
           idx = range(0, len(pix) - 2, 150)
+          n = len(idx)
           nz = sum(1 for i in idx if pix[i] | pix[i + 1] | pix[i + 2])
-          print(f"Screen resolution: {w}x{h}, non-black samples: {nz}/{len(idx)}")
+          r = sum(pix[i] for i in idx) // n
+          g = sum(pix[i + 1] for i in idx) // n
+          b = sum(pix[i + 2] for i in idx) // n
+          print(f"Screen: {w}x{h}, non-black: {nz}/{n}, avg RGB: ({r},{g},{b})")
           PY
           tail -n 20 /tmp/qemu.log || true
           sudo tail -n 20 /var/log/xrdp.log || true
@@ -211,6 +238,11 @@ jobs:
             if ! pgrep -f qemu-system-x86_64 >/dev/null; then
               echo "[$(date)] WARNING: QEMU stopped — restarting..."
               bash "$HOME/start_android.sh" && echo "[$(date)] QEMU restarted successfully"
+            fi
+
+            # فحص إبقاء الشاشة صاحية
+            if ! pgrep -f keepawake.sh >/dev/null; then
+              setsid nohup bash "$HOME/keepawake.sh" > /dev/null 2>&1 &
             fi
 
             # فحص xrdp
