@@ -24,25 +24,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 qemu-utils xrdp socat curl
 
-          # إعداد xrdp: يوصّل RDP إلى شاشة QEMU عبر VNC
+          # إعداد xrdp: نخلي الملف الأصلي ونضيف قسم Android فقط
           sudo systemctl stop xrdp || true
-          sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'XRDP'
-          [Globals]
-          ini_version=1
-          fork=true
-          port=3389
-          tcp_nodelay=true
-          tcp_keepalive=true
-          security_layer=negotiate
-          crypt_level=high
-          certificate=
-          key_file=
-          ssl_protocols=TLSv1.2, TLSv1.3
-          autorun=Android
-          allow_channels=true
-          max_bpp=24
-          bitmap_cache=true
-          bitmap_compression=true
+          sudo cp /etc/xrdp/xrdp.ini /etc/xrdp/xrdp.ini.bak
+          sudo sed -i '/^;\?autorun=/d' /etc/xrdp/xrdp.ini
+          sudo sed -i '/^\[Globals\]/a autorun=Android' /etc/xrdp/xrdp.ini
+          sudo tee -a /etc/xrdp/xrdp.ini > /dev/null << 'XRDP'
 
           [Android]
           name=Android
@@ -52,6 +39,9 @@ jobs:
           username=na
           password=ask
           XRDP
+          echo "--- xrdp.ini (head and tail) ---"
+          sudo head -n 20 /etc/xrdp/xrdp.ini
+          sudo tail -n 12 /etc/xrdp/xrdp.ini
 
           # سكربت تشغيل الـ VM (يُستخدم هنا وفي إعادة التشغيل)
           cat > "$HOME/start_android.sh" << 'EMU'
@@ -141,7 +131,15 @@ jobs:
           fi
           echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
 
-          sudo systemctl restart xrdp
+          if ! sudo systemctl restart xrdp; then
+            echo "=== xrdp FAILED: journal ==="
+            sudo journalctl -xeu xrdp --no-pager | tail -n 40
+            echo "=== xrdp.log ==="
+            sudo tail -n 40 /var/log/xrdp.log || true
+            echo "=== xrdp -n (config test) ==="
+            sudo xrdp --nodaemon 2>&1 | head -n 30 || true
+            exit 1
+          fi
           sleep 3
           sudo systemctl status xrdp --no-pager | head -n 12 || true
 
