@@ -1,18 +1,18 @@
-name: Android10
+name: AndroidDesktop
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-android:
+  secure-android-desktop:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 10
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Configure Core Android Settings
+      - name: Configure Core RDP Settings
         shell: bash
         run: |
           # تفعيل KVM
@@ -22,68 +22,69 @@ jobs:
           ls -l /dev/kvm || { echo "KVM غير متوفر على هذا الـ runner"; exit 1; }
 
           sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc fluxbox socat \
-            libpulse0 libxcb-cursor0 libxkbfile1 libgl1 libnss3 \
-            libxcb-icccm4 libxcb-keysyms1 libxcb-xinerama0 libxcb-xkb1 \
-            libxkbcommon-x11-0 libxcb-randr0 libxcb-xfixes0 libxcb-sync1 \
-            libxcb-xinput0 libx11-xcb1 libxcb-glx0
+          sudo apt-get install -y qemu-system-x86 qemu-utils xrdp socat curl
 
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$ANDROID_HOME/platform-tools"          >> $GITHUB_PATH
-          echo "$ANDROID_HOME/emulator"                >> $GITHUB_PATH
-          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          # إعداد xrdp: يوصّل RDP إلى شاشة QEMU عبر VNC
+          sudo systemctl stop xrdp || true
+          sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'XRDP'
+          [Globals]
+          ini_version=1
+          fork=true
+          port=3389
+          tcp_nodelay=true
+          tcp_keepalive=true
+          security_layer=negotiate
+          crypt_level=high
+          certificate=
+          key_file=
+          ssl_protocols=TLSv1.2, TLSv1.3
+          autorun=Android
+          allow_channels=true
+          max_bpp=24
+          bitmap_cache=true
+          bitmap_compression=true
 
-          # تثبيت مسار الـ AVD حتى يلقاه المحاكي
-          export ANDROID_AVD_HOME="$HOME/.android/avd"
-          mkdir -p "$ANDROID_AVD_HOME"
-          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> $GITHUB_ENV
+          [Android]
+          name=Android
+          lib=libvnc.so
+          ip=127.0.0.1
+          port=5901
+          username=na
+          password=ask
+          XRDP
 
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "emulator" \
-            "system-images;android-29;google_apis_playstore;x86_64"
-          echo no | avdmanager create avd -n android10 \
-            -k "system-images;android-29;google_apis_playstore;x86_64" \
-            -d pixel_2 --force
-          avdmanager list avd
-          ls -la "$ANDROID_AVD_HOME"
-
-          # سكربت تشغيل المحاكي (يُستخدم هنا وفي إعادة التشغيل)
+          # سكربت تشغيل الـ VM (يُستخدم هنا وفي إعادة التشغيل)
           cat > "$HOME/start_android.sh" << 'EMU'
           #!/usr/bin/env bash
-          export DISPLAY=:0
-          export ANDROID_AVD_HOME="$HOME/.android/avd"
-          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
-          pgrep -x Xvfb >/dev/null || { setsid nohup Xvfb :0 -screen 0 1080x1920x24 >/tmp/xvfb.log 2>&1 & sleep 2; }
-          pgrep -x fluxbox >/dev/null || { setsid nohup fluxbox >/tmp/fluxbox.log 2>&1 & sleep 1; }
-          setsid nohup emulator -avd android10 -accel on -gpu swiftshader_indirect \
-            -no-snapshot -no-audio -no-boot-anim -memory 4096 -cores 3 \
-            >/tmp/emulator.log 2>&1 &
-          sleep 30
-          echo "--- emulator log ---"
-          tail -n 40 /tmp/emulator.log
-          if ! pgrep -f qemu-system >/dev/null; then
-            echo "emulator NOT running"
+          MON=/tmp/qemu-mon.sock
+          rm -f "$MON"
+          setsid nohup qemu-system-x86_64 \
+            -enable-kvm -cpu host -m 6144 -smp 3 \
+            -vga std -usb -device usb-tablet \
+            -netdev user,id=n0,hostfwd=tcp:127.0.0.1:5556-:5555 -device e1000,netdev=n0 \
+            -cdrom "$HOME/android.iso" -boot d \
+            -display none -vnc 127.0.0.1:1,password=on \
+            -monitor unix:"$MON",server,nowait \
+            -no-shutdown \
+            >/tmp/qemu.log 2>&1 &
+          sleep 3
+          if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+            echo "QEMU NOT running"
+            cat /tmp/qemu.log
             exit 1
           fi
-          echo "emulator running"
-          adb start-server
-          timeout 300 adb wait-for-device || { echo "adb wait timeout"; tail -n 80 /tmp/emulator.log; exit 1; }
-          for i in $(seq 1 90); do
-            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
-              echo "Android booted"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Emulator boot timeout"
-          tail -n 60 /tmp/emulator.log
-          exit 1
+          # باسورد VNC
+          { echo "set_password vnc $VNC_PASS"; sleep 1; } | socat - UNIX-CONNECT:"$MON" > /dev/null
+          # اختيار Live CD من قائمة الإقلاع
+          sleep 20
+          { echo "sendkey ret"; sleep 1; } | socat - UNIX-CONNECT:"$MON" > /dev/null
+          sleep 60
+          { echo "info status"; sleep 1; } | socat - UNIX-CONNECT:"$MON"
+          echo "QEMU running"
           EMU
           chmod +x "$HOME/start_android.sh"
-          bash "$HOME/start_android.sh"
-          adb shell getprop ro.build.version.release
 
-      - name: Create VNC Password
+      - name: Create RDP Password
         shell: bash
         run: |
           password=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 8)
@@ -93,29 +94,29 @@ jobs:
           fi
           echo "VNC_PASS=$password" >> $GITHUB_ENV
 
-      - name: Keep Android Awake (No Sleep)
+      - name: Download Android Desktop ISO
+        timeout-minutes: 20
         shell: bash
         run: |
-          adb shell svc power stayon true
-          adb shell settings put global stay_on_while_plugged_in 7
-          adb shell settings put system screen_off_timeout 2147483647
-          adb shell input keyevent KEYCODE_WAKEUP
-          adb shell input keyevent 82
-          echo "Android sleep disabled"
-
-      - name: Install Google Play Store
-        timeout-minutes: 15
-        continue-on-error: true
-        shell: bash
-        run: |
-          # صورة google_apis_playstore فيها المتجر جاهز
-          adb shell pm list packages > /tmp/pkgs.txt
-          if grep -q "com.android.vending" /tmp/pkgs.txt; then
-            echo "Play Store is installed"
-          else
-            echo "Play Store package not found"
+          curl -L --fail --retry 3 -o "$HOME/android.iso" \
+            "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso/download" || true
+          size=$(stat -c%s "$HOME/android.iso" 2>/dev/null || echo 0)
+          if [ "$size" -lt 500000000 ]; then
+            echo "Primary download failed (size=$size), trying mirror (32-bit)..."
+            curl -L --fail --retry 3 -o "$HOME/android.iso" \
+              "https://mirrors.xtom.com/osdn//android-x86/71931/android-x86-9.0-r2.iso"
+            size=$(stat -c%s "$HOME/android.iso" 2>/dev/null || echo 0)
+          fi
+          echo "ISO size: $size"
+          if [ "$size" -lt 500000000 ]; then
+            echo "ISO download failed"
             exit 1
           fi
+
+      - name: Start Android Desktop VM
+        shell: bash
+        run: |
+          bash "$HOME/start_android.sh"
 
       - name: Install Tailscale
         shell: bash
@@ -127,7 +128,7 @@ jobs:
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          sudo tailscale up --authkey="$TS_KEY" --hostname="gh-android-$GITHUB_RUN_ID"
+          sudo tailscale up --authkey="$TS_KEY" --hostname="gh-androiddesk-$GITHUB_RUN_ID"
           tsIP=""
           for i in $(seq 1 10); do
             tsIP=$(sudo tailscale ip -4 2>/dev/null | head -n1)
@@ -140,77 +141,65 @@ jobs:
           fi
           echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
 
-          # VNC على عنوان Tailscale فقط
-          mkdir -p ~/.vnc
-          x11vnc -storepasswd "$VNC_PASS" ~/.vnc/passwd
-          DISPLAY=:0 x11vnc -display :0 -rfbauth ~/.vnc/passwd \
-            -listen "$tsIP" -rfbport 5900 -forever -shared -bg -o /tmp/x11vnc.log
+          sudo systemctl restart xrdp
+          sleep 3
+          sudo systemctl status xrdp --no-pager | head -n 12 || true
 
-          # ADB (للـ scrcpy من الكمبيوتر)
-          setsid nohup socat TCP-LISTEN:5555,bind="$tsIP",fork,reuseaddr TCP:127.0.0.1:5555 >/tmp/socat.log 2>&1 &
-          sleep 2
-
-      - name: Verify Android Accessibility
+      - name: Verify RDP Accessibility
         shell: bash
         run: |
           echo "Tailscale IP: $TAILSCALE_IP"
-          for port in 5900 5555; do
-            if timeout 5 bash -c "</dev/tcp/$TAILSCALE_IP/$port"; then
-              echo "TCP connectivity to port $port successful!"
-            else
-              echo "TCP connection to port $port failed"
-              exit 1
-            fi
-          done
-          adb devices
+          if timeout 5 bash -c "</dev/tcp/$TAILSCALE_IP/3389"; then
+            echo "TCP connectivity to RDP port 3389 successful!"
+          else
+            echo "TCP connection to RDP port 3389 failed"
+            sudo tail -n 30 /var/log/xrdp.log || true
+            exit 1
+          fi
+          if timeout 5 bash -c "</dev/tcp/127.0.0.1/5901"; then
+            echo "QEMU VNC (5901) is up"
+          else
+            echo "QEMU VNC (5901) is NOT up"
+            exit 1
+          fi
 
       - name: Maintain Connection
         shell: bash
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          # نسخ ملفات Codebase (يحتاج ADB داخل Android، محاولة فقط)
           src="$GITHUB_WORKSPACE/Codebase"
-          downloads="/sdcard/Download"
-
+          export PATH="$ANDROID_HOME/platform-tools:$PATH"
           if [ -d "$src" ]; then
-            adb push "$src/." "$downloads/"
-            echo "Files copied to Downloads:"
-            adb shell ls -R "$downloads"
+            adb connect 127.0.0.1:5556 || true
+            adb -s 127.0.0.1:5556 push "$src/." /sdcard/Download/ || echo "WARNING: ADB push failed (adb inside Android may be disabled)"
             for apk in $(find "$src" -name '*.apk'); do
-              echo "Installing $apk"
-              adb install -r "$apk" || true
+              adb -s 127.0.0.1:5556 install -r "$apk" || true
             done
           else
             echo "WARNING: Codebase folder not found in repo"
           fi
 
           echo ""
-          echo "=== ANDROID 10 ACCESS ==="
-          echo "VNC     : $TAILSCALE_IP:5900"
+          echo "=== ANDROID DESKTOP RDP ACCESS ==="
+          echo "Address : $TAILSCALE_IP"
+          echo "Username: na  (أي اسم)"
           echo "Password: $VNC_PASS"
-          echo "ADB     : adb connect $TAILSCALE_IP:5555  ثم  scrcpy -s $TAILSCALE_IP:5555"
-          echo "Files at: /sdcard/Download"
-          echo "=========================="
+          echo "=================================="
           echo ""
 
           while true; do
-            # فحص المحاكي
-            if ! pgrep -f "qemu-system" >/dev/null; then
-              echo "[$(date)] WARNING: Emulator stopped — restarting..."
-              bash "$HOME/start_android.sh" && echo "[$(date)] Emulator restarted successfully"
+            # فحص الـ VM
+            if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+              echo "[$(date)] WARNING: QEMU stopped — restarting..."
+              bash "$HOME/start_android.sh" && echo "[$(date)] QEMU restarted successfully"
             fi
 
-            # فحص VNC
-            if ! pgrep -x x11vnc >/dev/null; then
-              echo "[$(date)] WARNING: VNC stopped — restarting..."
-              DISPLAY=:0 x11vnc -display :0 -rfbauth ~/.vnc/passwd \
-                -listen "$TAILSCALE_IP" -rfbport 5900 -forever -shared -bg -o /tmp/x11vnc.log
-            fi
-
-            # فحص ADB forward
-            if ! pgrep -x socat >/dev/null; then
-              echo "[$(date)] WARNING: ADB forward stopped — restarting..."
-              setsid nohup socat TCP-LISTEN:5555,bind="$TAILSCALE_IP",fork,reuseaddr TCP:127.0.0.1:5555 >/tmp/socat.log 2>&1 &
+            # فحص xrdp
+            if ! systemctl is-active --quiet xrdp; then
+              echo "[$(date)] WARNING: xrdp stopped — restarting..."
+              sudo systemctl restart xrdp
             fi
 
             # فحص Tailscale
@@ -221,6 +210,6 @@ jobs:
               sudo tailscale up --authkey="$TS_KEY" || true
             fi
 
-            echo "[$(date)] OK — Android state: $(adb get-state 2>&1 | tr -d '\r')"
+            echo "[$(date)] OK"
             sleep 1800
           done
