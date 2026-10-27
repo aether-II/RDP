@@ -6,7 +6,7 @@ on:
 jobs:
   secure-android-desktop:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
@@ -21,8 +21,11 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm || { echo "KVM غير متوفر على هذا الـ runner"; exit 1; }
 
+          # تثبيت خفيف بدون الحزم الرسومية الزايدة
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils xrdp socat curl
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils seabios ipxe-qemu \
+            xrdp ssl-cert socat curl
 
           # إعداد xrdp: نخلي الملف الأصلي ونضيف قسم Android فقط
           sudo systemctl stop xrdp || true
