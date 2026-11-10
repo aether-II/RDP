@@ -22,21 +22,26 @@ jobs:
                            -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "SecurityLayer" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' `
-                           -Name "LimitBlankPasswordUse" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create Atwy User (No Password)
+      - name: Create Atwy User (Password 123)
         shell: pwsh
         run: |
-          # السماح بباسورد فارغ وبدون انتهاء صلاحية
+          # إلغاء تعقيد الباسورد والحد الأدنى للطول حتى يُقبل 123
+          secedit /export /cfg "$env:TEMP\pw.cfg"
+          (Get-Content "$env:TEMP\pw.cfg") `
+            -replace "PasswordComplexity\s*=\s*1", "PasswordComplexity = 0" `
+            -replace "MinimumPasswordLength\s*=\s*\d+", "MinimumPasswordLength = 0" |
+            Set-Content "$env:TEMP\pw.cfg"
+          secedit /configure /db "$env:TEMP\pw.sdb" /cfg "$env:TEMP\pw.cfg" /areas SECURITYPOLICY /quiet
+          Remove-Item "$env:TEMP\pw.cfg" -Force
           net accounts /minpwlen:0 /maxpwage:unlimited /minpwage:0
-          New-LocalUser -Name "Atwy" -NoPassword -AccountNeverExpires
-          Set-LocalUser -Name "Atwy" -PasswordNeverExpires $true -UserMayChangePassword $false
-          net user Atwy /passwordreq:no
+
+          $securePass = ConvertTo-SecureString "123" -AsPlainText -Force
+          New-LocalUser -Name "Atwy" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
           net user Atwy /logonpasswordchg:no
           Add-LocalGroupMember -Group "Administrators"       -Member "Atwy"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Atwy"
@@ -45,7 +50,7 @@ jobs:
               exit 1
           }
           net user Atwy
-          Write-Host "User Atwy created without password"
+          Write-Host "User Atwy created with password 123"
 
       - name: Disable Shutdown & Restart for Atwy
         shell: pwsh
@@ -69,7 +74,6 @@ jobs:
 
           Invoke-WebRequest -Uri $wpUrl -OutFile $wpPath -UserAgent "Mozilla/5.0"
 
-          # تحقق أن الملف PNG فعلاً وليس صفحة حجب
           $bytes = [System.IO.File]::ReadAllBytes($wpPath)
           if ($bytes.Length -lt 1000 -or $bytes[0] -ne 0x89 -or $bytes[1] -ne 0x50 -or $bytes[2] -ne 0x4E -or $bytes[3] -ne 0x47) {
               Write-Error "Downloaded file is not a valid PNG (size: $($bytes.Length) bytes)"
@@ -177,9 +181,9 @@ jobs:
           }
 
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address : $env:TAILSCALE_IP  (or: atwy)"
+          Write-Host "Address : atwy   (IP: $env:TAILSCALE_IP)"
           Write-Host "Username: Atwy"
-          Write-Host "Password: (none - leave empty)"
+          Write-Host "Password: 123"
           Write-Host "Files at: C:\Users\Atwy\Downloads"
           Write-Host "==================`n"
 
