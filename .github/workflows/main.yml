@@ -22,7 +22,6 @@ jobs:
                            -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "SecurityLayer" -Value 0 -Force
-          # السماح بالدخول بدون باسورد
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' `
                            -Name "LimitBlankPasswordUse" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
@@ -59,12 +58,19 @@ jobs:
         run: |
           $ProgressPreference = 'SilentlyContinue'
 
-          # تحميل الخلفية
+          $wpUrl  = "https://i.imgur.com/E3vPXT9.png"
           $wpPath = "C:\Windows\Web\Wallpaper\atwy.png"
-          Invoke-WebRequest -Uri "https://4kwallpapers.com/images/walls/thumbs_2t/8710.png" `
-            -OutFile $wpPath -UserAgent "Mozilla/5.0" -Headers @{ Referer = "https://4kwallpapers.com/" }
 
-          # تعديل ملف المستخدم الافتراضي حتى ينطبق على Atwy عند أول دخول
+          Invoke-WebRequest -Uri $wpUrl -OutFile $wpPath -UserAgent "Mozilla/5.0"
+
+          # تحقق أن الملف PNG فعلاً وليس صفحة حجب
+          $bytes = [System.IO.File]::ReadAllBytes($wpPath)
+          if ($bytes.Length -lt 1000 -or $bytes[0] -ne 0x89 -or $bytes[1] -ne 0x50 -or $bytes[2] -ne 0x4E -or $bytes[3] -ne 0x47) {
+              Write-Error "Downloaded file is not a valid PNG (size: $($bytes.Length) bytes)"
+              exit 1
+          }
+          Write-Host "Wallpaper downloaded OK ($($bytes.Length) bytes)"
+
           reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT" | Out-Null
           try {
               $personalize = "Registry::HKEY_USERS\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
@@ -75,7 +81,7 @@ jobs:
               $desktop = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
               New-Item -Path $desktop -Force | Out-Null
               Set-ItemProperty -Path $desktop -Name "Wallpaper"      -Type String -Value $wpPath
-              Set-ItemProperty -Path $desktop -Name "WallpaperStyle" -Type String -Value "6"   # Fit
+              Set-ItemProperty -Path $desktop -Name "WallpaperStyle" -Type String -Value "6"
               Set-ItemProperty -Path $desktop -Name "TileWallpaper"  -Type String -Value "0"
           } finally {
               [gc]::Collect()
