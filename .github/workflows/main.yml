@@ -32,13 +32,19 @@ jobs:
       - name: Create Atwy User (No Password)
         shell: pwsh
         run: |
+          # السماح بباسورد فارغ وبدون انتهاء صلاحية
+          net accounts /minpwlen:0 /maxpwage:unlimited /minpwage:0
           New-LocalUser -Name "Atwy" -NoPassword -AccountNeverExpires
+          Set-LocalUser -Name "Atwy" -PasswordNeverExpires $true -UserMayChangePassword $false
+          net user Atwy /passwordreq:no
+          net user Atwy /logonpasswordchg:no
           Add-LocalGroupMember -Group "Administrators"       -Member "Atwy"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Atwy"
           if (-not (Get-LocalUser -Name "Atwy" -ErrorAction SilentlyContinue)) {
               Write-Error "User creation failed"
               exit 1
           }
+          net user Atwy
           Write-Host "User Atwy created without password"
 
       - name: Disable Shutdown & Restart for Atwy
