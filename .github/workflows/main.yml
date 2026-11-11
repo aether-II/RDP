@@ -1,4 +1,3 @@
-
 name: RDP
 
 on:
@@ -6,7 +5,7 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: windows-2025-vs2026
+    runs-on: windows-2022
     timeout-minutes: 3600
 
     steps:
@@ -63,65 +62,6 @@ jobs:
             /cfg "$env:TEMP\secpol.cfg" /quiet
           Remove-Item "$env:TEMP\secpol.cfg" -Force
           Write-Host "Shutdown/Restart disabled"
-
-      - name: Dark Theme + Wallpaper (Fit)
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-
-          $wpUrl  = "https://i.imgur.com/E3vPXT9.png"
-          $wpPath = "C:\Windows\Web\Wallpaper\atwy.png"
-
-          Invoke-WebRequest -Uri $wpUrl -OutFile $wpPath -UserAgent "Mozilla/5.0"
-
-          $bytes = [System.IO.File]::ReadAllBytes($wpPath)
-          if ($bytes.Length -lt 1000 -or $bytes[0] -ne 0x89 -or $bytes[1] -ne 0x50 -or $bytes[2] -ne 0x4E -or $bytes[3] -ne 0x47) {
-              Write-Error "Downloaded file is not a valid PNG (size: $($bytes.Length) bytes)"
-              exit 1
-          }
-          Write-Host "Wallpaper downloaded OK ($($bytes.Length) bytes)"
-
-          reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT" | Out-Null
-          try {
-              $personalize = "Registry::HKEY_USERS\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-              New-Item -Path $personalize -Force | Out-Null
-              Set-ItemProperty -Path $personalize -Name "AppsUseLightTheme"    -Type DWord -Value 0
-              Set-ItemProperty -Path $personalize -Name "SystemUsesLightTheme" -Type DWord -Value 0
-
-              $desktop = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
-              New-Item -Path $desktop -Force | Out-Null
-              Set-ItemProperty -Path $desktop -Name "Wallpaper"      -Type String -Value $wpPath
-              Set-ItemProperty -Path $desktop -Name "WallpaperStyle" -Type String -Value "6"
-              Set-ItemProperty -Path $desktop -Name "TileWallpaper"  -Type String -Value "0"
-          } finally {
-              [gc]::Collect()
-              Start-Sleep -Seconds 2
-              reg unload HKU\DefaultUser | Out-Null
-          }
-          Write-Host "Dark theme + wallpaper (Fit) configured"
-
-      - name: Install Microsoft Store
-        timeout-minutes: 15
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-
-          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-              Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe
-          }
-
-          $store = Get-AppxPackage -AllUsers Microsoft.WindowsStore
-          if ($store) {
-              $store | ForEach-Object {
-                  Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml"
-              }
-          } else {
-              Write-Warning "Microsoft.WindowsStore package not found"
-          }
-
-          winget install 9WZDNCRFJBMP --accept-package-agreements --accept-source-agreements --disable-interactivity
-          Write-Host "Exit code: $LASTEXITCODE"
 
       - name: Install Tailscale
         shell: pwsh
