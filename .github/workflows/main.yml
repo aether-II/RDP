@@ -1,70 +1,160 @@
-name: MacOS
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  mac-vnc:
-    runs-on: macos-15
-    timeout-minutes: 360
+  secure-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 3600
 
     steps:
-      - name: Create Atwy User
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure Core RDP Settings
+        shell: pwsh
         run: |
-          sudo pwpolicy -clearaccountpolicies || true
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                           -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
 
-          PW="123"
-          sudo dscl . -create /Users/atwy
-          sudo dscl . -create /Users/atwy UserShell /bin/zsh
-          sudo dscl . -create /Users/atwy RealName "Atwy"
-          sudo dscl . -create /Users/atwy UniqueID 601
-          sudo dscl . -create /Users/atwy PrimaryGroupID 20
-          sudo dscl . -create /Users/atwy NFSHomeDirectory /Users/atwy
-
-          if ! sudo dscl . -passwd /Users/atwy "$PW"; then
-            echo "Password 123 rejected by macOS, using fallback"
-            PW="Atwy1234"
-            sudo dscl . -passwd /Users/atwy "$PW"
-          fi
-
-          sudo dscl . -append /Groups/admin GroupMembership atwy
-          sudo createhomedir -c -u atwy || sudo mkdir -p /Users/atwy
-          sudo chown -R atwy:staff /Users/atwy
-          dscl . -read /Users/atwy UniqueID RealName
-          echo "FINAL_PW=$PW" >> $GITHUB_ENV
-
-      - name: Enable VNC
+      - name: Create Atwy User (Password 123)
+        shell: pwsh
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw "$FINAL_PW" \
-            -restart -agent -privs -all
-          sleep 5
-          nc -z localhost 5900 && echo "VNC is listening on 5900" || echo "VNC NOT listening"
+          # إلغاء تعقيد الباسورد والحد الأدنى للطول حتى يُقبل 123
+          secedit /export /cfg "$env:TEMP\pw.cfg"
+          (Get-Content "$env:TEMP\pw.cfg") `
+            -replace "PasswordComplexity\s*=\s*1", "PasswordComplexity = 0" `
+            -replace "MinimumPasswordLength\s*=\s*\d+", "MinimumPasswordLength = 0" |
+            Set-Content "$env:TEMP\pw.cfg"
+          secedit /configure /db "$env:TEMP\pw.sdb" /cfg "$env:TEMP\pw.cfg" /areas SECURITYPOLICY /quiet
+          Remove-Item "$env:TEMP\pw.cfg" -Force
+          net accounts /minpwlen:0 /maxpwage:unlimited /minpwage:0
 
-      - name: Connect Tailscale
-        uses: tailscale/github-action@v3
-        with:
-          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
-          hostname: atwy
+          $securePass = ConvertTo-SecureString "123" -AsPlainText -Force
+          New-LocalUser -Name "Atwy" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          net user Atwy /logonpasswordchg:no
+          Add-LocalGroupMember -Group "Administrators"       -Member "Atwy"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Atwy"
+          if (-not (Get-LocalUser -Name "Atwy" -ErrorAction SilentlyContinue)) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+          net user Atwy
+          Write-Host "User Atwy created with password 123"
 
-      - name: Show Access Info
+      - name: Disable Shutdown & Restart for Atwy
+        shell: pwsh
         run: |
-          TS_IP=$(tailscale ip -4)
-          echo ""
-          echo "=== VNC ACCESS ==="
-          echo "Address : atwy   (IP: $TS_IP)"
-          echo "Port    : 5900"
-          echo "Username: atwy"
-          echo "Password: $FINAL_PW"
-          echo "Console user: $(stat -f%Su /dev/console)"
-          sw_vers
-          echo "=================="
+          secedit /export /cfg "$env:TEMP\secpol.cfg"
+          (Get-Content "$env:TEMP\secpol.cfg") `
+            -replace "SeShutdownPrivilege.*", "" |
+            Set-Content "$env:TEMP\secpol.cfg"
+          secedit /configure /db secedit.sdb `
+            /cfg "$env:TEMP\secpol.cfg" /quiet
+          Remove-Item "$env:TEMP\secpol.cfg" -Force
+          Write-Host "Shutdown/Restart disabled"
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = Join-Path $env:RUNNER_TEMP "tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        shell: pwsh
+        run: |
+          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+          & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=atwy
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & $tailscaleExe ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        shell: pwsh
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
+        shell: pwsh
         run: |
-          while true; do
-            echo "[$(date)] OK"
-            sleep 1800
-          done
+          $src       = "$env:GITHUB_WORKSPACE\Codebase"
+          $downloads = "C:\Users\Atwy\Downloads"
+
+          if (-not (Test-Path $downloads)) {
+              New-Item -ItemType Directory -Path $downloads -Force | Out-Null
+          }
+
+          if (Test-Path $src) {
+              Copy-Item -Path "$src\*" -Destination $downloads -Recurse -Force
+              Write-Host "Files copied to Downloads:"
+              Get-ChildItem $downloads -Recurse | Select-Object FullName
+          } else {
+              Write-Warning "Codebase folder not found in repo"
+          }
+
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address : atwy   (IP: $env:TAILSCALE_IP)"
+          Write-Host "Username: Atwy"
+          Write-Host "Password: 123"
+          Write-Host "Files at: C:\Users\Atwy\Downloads"
+          Write-Host "==================`n"
+
+          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+
+          while ($true) {
+              try {
+                  $uptime = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+
+                  $rdpService = Get-Service -Name TermService -ErrorAction Stop
+                  if ($rdpService.Status -ne 'Running') {
+                      Write-Warning "[$(Get-Date)] TermService stopped — restarting..."
+                      Restart-Service -Name TermService -Force
+                      Write-Host "[$(Get-Date)] TermService restarted successfully"
+                  }
+
+                  $tsService = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
+                  if ($tsService -and $tsService.Status -ne 'Running') {
+                      Write-Warning "[$(Get-Date)] Tailscale stopped — restarting..."
+                      Start-Service -Name Tailscale
+                      Start-Sleep -Seconds 5
+                      & $tailscaleExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=atwy
+                      Write-Host "[$(Get-Date)] Tailscale restarted successfully"
+                  }
+
+                  Write-Host "[$(Get-Date)] OK — Uptime: $([math]::Round($uptime.TotalMinutes, 1)) min"
+
+              } catch {
+                  Write-Error "[$(Get-Date)] ERROR: $($_.Exception.Message)"
+                  Write-Error "Stack: $($_.ScriptStackTrace)"
+              }
+
+              Start-Sleep -Seconds 1800
+          }
