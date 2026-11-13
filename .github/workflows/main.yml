@@ -5,13 +5,12 @@ on:
 
 jobs:
   mac-vnc:
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 360
 
     steps:
       - name: Create Atwy User
         run: |
-          # إلغاء سياسة جودة الباسورد
           sudo pwpolicy -clearaccountpolicies || true
 
           PW="123"
@@ -59,6 +58,8 @@ jobs:
           echo "Port    : 5900"
           echo "Username: atwy"
           echo "Password: $FINAL_PW"
+          echo "Console user: $(stat -f%Su /dev/console)"
+          sw_vers
           echo "=================="
 
       - name: Maintain Connection
