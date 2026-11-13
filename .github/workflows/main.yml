@@ -9,8 +9,11 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Create Atwy User (Password 123)
+      - name: Create Atwy User
         run: |
+          # إلغاء سياسة جودة الباسورد
+          sudo pwpolicy -clearaccountpolicies || true
+
           PW="123"
           sudo dscl . -create /Users/atwy
           sudo dscl . -create /Users/atwy UserShell /bin/zsh
@@ -18,18 +21,25 @@ jobs:
           sudo dscl . -create /Users/atwy UniqueID 601
           sudo dscl . -create /Users/atwy PrimaryGroupID 20
           sudo dscl . -create /Users/atwy NFSHomeDirectory /Users/atwy
-          sudo dscl . -passwd /Users/atwy "$PW"
+
+          if ! sudo dscl . -passwd /Users/atwy "$PW"; then
+            echo "Password 123 rejected by macOS, using fallback"
+            PW="Atwy1234"
+            sudo dscl . -passwd /Users/atwy "$PW"
+          fi
+
           sudo dscl . -append /Groups/admin GroupMembership atwy
           sudo createhomedir -c -u atwy || sudo mkdir -p /Users/atwy
           sudo chown -R atwy:staff /Users/atwy
           dscl . -read /Users/atwy UniqueID RealName
+          echo "FINAL_PW=$PW" >> $GITHUB_ENV
 
       - name: Enable VNC
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw 123 \
+            -clientopts -setvncpw -vncpw "$FINAL_PW" \
             -restart -agent -privs -all
           sleep 5
           nc -z localhost 5900 && echo "VNC is listening on 5900" || echo "VNC NOT listening"
@@ -48,7 +58,7 @@ jobs:
           echo "Address : atwy   (IP: $TS_IP)"
           echo "Port    : 5900"
           echo "Username: atwy"
-          echo "Password: 123"
+          echo "Password: $FINAL_PW"
           echo "=================="
 
       - name: Maintain Connection
