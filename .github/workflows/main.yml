@@ -11,8 +11,18 @@ jobs:
     steps:
       - name: Create Atwy User (Password 123)
         run: |
-          sudo sysadminctl -addUser atwy -fullName "Atwy" -password 123 -admin
-          dscl . -read /Users/atwy UniqueID
+          PW="123"
+          sudo dscl . -create /Users/atwy
+          sudo dscl . -create /Users/atwy UserShell /bin/zsh
+          sudo dscl . -create /Users/atwy RealName "Atwy"
+          sudo dscl . -create /Users/atwy UniqueID 601
+          sudo dscl . -create /Users/atwy PrimaryGroupID 20
+          sudo dscl . -create /Users/atwy NFSHomeDirectory /Users/atwy
+          sudo dscl . -passwd /Users/atwy "$PW"
+          sudo dscl . -append /Groups/admin GroupMembership atwy
+          sudo createhomedir -c -u atwy || sudo mkdir -p /Users/atwy
+          sudo chown -R atwy:staff /Users/atwy
+          dscl . -read /Users/atwy UniqueID RealName
 
       - name: Enable VNC
         run: |
